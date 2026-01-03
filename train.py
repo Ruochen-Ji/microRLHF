@@ -54,6 +54,12 @@ n_head = 12
 n_embd = 768
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
+# LoRA settings
+use_lora = False # whether to use LoRA for parameter-efficient finetuning
+lora_rank = 8 # rank of the low-rank decomposition
+lora_alpha = 16.0 # scaling factor (LoRA output scaled by alpha/rank)
+lora_dropout = 0.0 # dropout for LoRA layers
+lora_target_modules = ['c_attn', 'c_proj'] # which modules to apply LoRA to
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
@@ -190,6 +196,20 @@ elif init_from.startswith('gpt2'):
 if block_size < model.config.block_size:
     model.crop_block_size(block_size)
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
+
+# Apply LoRA if enabled
+# This must happen AFTER loading weights but BEFORE model.to(device)
+if use_lora:
+    from lora import apply_lora_to_model, get_lora_state_dict
+    print(f"\nApplying LoRA with rank={lora_rank}, alpha={lora_alpha}")
+    model = apply_lora_to_model(
+        model,
+        rank=lora_rank,
+        alpha=lora_alpha,
+        dropout=lora_dropout,
+        target_modules=lora_target_modules,
+    )
+
 model.to(device)
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
@@ -282,6 +302,16 @@ while True:
                     'best_val_loss': best_val_loss,
                     'config': config,
                 }
+                # If using LoRA, also save just the LoRA weights separately
+                # This allows loading the small LoRA checkpoint without the full model
+                if use_lora:
+                    checkpoint['lora_state_dict'] = get_lora_state_dict(raw_model)
+                    checkpoint['lora_config'] = {
+                        'rank': lora_rank,
+                        'alpha': lora_alpha,
+                        'dropout': lora_dropout,
+                        'target_modules': lora_target_modules,
+                    }
                 print(f"saving checkpoint to {out_dir}")
                 torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
     if iter_num == 0 and eval_only:

@@ -38,6 +38,20 @@ if init_from == 'resume':
     checkpoint = torch.load(ckpt_path, map_location=device)
     gptconf = GPTConfig(**checkpoint['model_args'])
     model = GPT(gptconf)
+    
+    # Check if this is a LoRA checkpoint
+    if 'lora_config' in checkpoint:
+        print("Detected LoRA checkpoint, applying LoRA layers...")
+        from lora import apply_lora_to_model
+        lora_cfg = checkpoint['lora_config']
+        model = apply_lora_to_model(
+            model,
+            rank=lora_cfg['rank'],
+            alpha=lora_cfg['alpha'],
+            dropout=0.0,  # No dropout during inference
+            target_modules=lora_cfg['target_modules'],
+        )
+    
     state_dict = checkpoint['model']
     unwanted_prefix = '_orig_mod.'
     for k,v in list(state_dict.items()):
