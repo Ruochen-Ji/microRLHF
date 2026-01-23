@@ -8,5 +8,10 @@ __pycache__/
 *.pt
 *.pyc
 input.txt
+.envrc
 env/
 venv/
+.venv/
+data/
+!data/shakespeare/
+!data/shakespeare/**
