@@ -179,10 +179,22 @@ nanoRLHF/
 │   ├── training_tab.py     # Training visualization
 │   ├── finetune_tab.py     # SFT/LoRA controls
 │   └── annotate_tab.py     # Preference collection UI
-├── nanogpt/                # Base nanoGPT code
-│   ├── model.py
-│   ├── train.py
-│   └── ...
+├── nanogpt/                # Base nanoGPT code (wrapper module)
+│   └── __init__.py         # Exports GPT, GPTConfig from root
+├── data/
+│   ├── shakespeare/        # Character-level Shakespeare data
+│   │   └── prepare.py
+│   ├── shakespeare_char/   # Token-level Shakespeare data
+│   │   └── prepare.py
+│   ├── alpaca/             # Instruction-following dataset (SFT)
+│   │   └── prepare.py
+│   ├── openwebtext/        # Large-scale pretraining data
+│   │   └── prepare.py
+│   ├── preferences/        # Human preference data (RLHF)
+│   │   ├── train.json      # Training preferences
+│   │   └── val.json        # Validation preferences
+│   └── prompts/            # Prompts for PPO generation
+│       └── train.json
 ├── rlhf/
 │   ├── sft.py              # Supervised fine-tuning
 │   ├── lora.py             # LoRA implementation
@@ -196,10 +208,15 @@ nanoRLHF/
 │   ├── ppo_config.yaml
 │   └── dpo_config.yaml
 ├── scripts/
+│   ├── train_sft.py        # SFT training script
 │   ├── collect_preferences.py
 │   ├── train_reward_model.py
 │   ├── train_ppo.py
 │   └── train_dpo.py
+├── model.py                # Core GPT model (from nanoGPT)
+├── train.py                # Base training script
+├── sample.py               # Inference/generation script
+├── lora.py                 # LoRA implementation
 └── README.md
 ```
 

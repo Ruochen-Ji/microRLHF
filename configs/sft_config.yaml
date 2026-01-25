@@ -1,0 +1,38 @@
+# Supervised Fine-Tuning Configuration
+# Phase 2: SFT training on instruction datasets
+
+# Model
+model:
+  checkpoint: "out-shakespeare/ckpt.pt"  # Base model checkpoint
+  use_lora: false                         # Enable LoRA for memory efficiency
+
+# LoRA settings (if use_lora: true)
+lora:
+  r: 8                    # Rank of low-rank matrices
+  alpha: 16.0             # Scaling factor
+  dropout: 0.0            # Dropout probability
+  target_modules:         # Modules to apply LoRA to
+    - c_attn
+    - c_proj
+
+# Data
+data:
+  train_path: "data/alpaca/train.json"
+  val_path: "data/alpaca/val.json"
+  max_length: 512         # Maximum sequence length
+
+# Training
+training:
+  batch_size: 4
+  gradient_accumulation_steps: 8
+  learning_rate: 2.0e-5
+  weight_decay: 0.01
+  warmup_steps: 100
+  max_steps: 5000
+  eval_interval: 500
+  save_interval: 1000
+
+# Output
+output:
+  dir: "out-sft"
+  log_interval: 10

@@ -1,0 +1,30 @@
+# Reward Model Configuration
+# Phase 4: Train reward model on preference data
+
+# Model
+model:
+  backbone_checkpoint: "out-sft/ckpt.pt"  # SFT model as backbone
+  freeze_backbone: false                   # Whether to freeze GPT backbone
+  hidden_size: 768                         # Must match backbone
+
+# Data
+data:
+  train_path: "data/preferences/train.json"
+  val_path: "data/preferences/val.json"
+  max_length: 512
+
+# Training
+training:
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  learning_rate: 1.0e-5
+  weight_decay: 0.01
+  warmup_steps: 50
+  max_steps: 2000
+  eval_interval: 200
+  save_interval: 500
+
+# Output
+output:
+  dir: "out-reward"
+  log_interval: 10

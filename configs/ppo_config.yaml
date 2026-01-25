@@ -1,0 +1,42 @@
+# PPO RLHF Configuration
+# Phase 5: Train policy with PPO using reward model
+
+# Models
+models:
+  policy_checkpoint: "out-sft/ckpt.pt"    # Initial policy (SFT model)
+  reward_checkpoint: "out-reward/ckpt.pt"  # Trained reward model
+
+# PPO Hyperparameters
+ppo:
+  beta: 0.1               # KL penalty coefficient
+  clip_range: 0.2         # PPO clipping range
+  vf_coef: 0.5            # Value function loss coefficient
+  entropy_coef: 0.01      # Entropy bonus coefficient
+  gamma: 1.0              # Discount factor (1.0 for episodic)
+  lam: 0.95               # GAE lambda
+
+# Generation
+generation:
+  max_new_tokens: 128     # Max tokens to generate
+  temperature: 1.0
+  top_k: 50
+
+# Data
+data:
+  prompt_path: "data/prompts/train.json"
+  max_prompt_length: 256
+
+# Training
+training:
+  batch_size: 4
+  mini_batch_size: 2
+  ppo_epochs: 4           # PPO update epochs per batch
+  learning_rate: 1.0e-6
+  max_steps: 1000
+  eval_interval: 100
+  save_interval: 200
+
+# Output
+output:
+  dir: "out-ppo"
+  log_interval: 10
