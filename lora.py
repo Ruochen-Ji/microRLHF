@@ -84,7 +84,7 @@ class LoRALinear(nn.Module):
         in_features = original_linear.in_features
         out_features = original_linear.out_features
         
-        # Freeze the original weights - we don't want to update these!
+        # Freeze the original weights because we don't want to update the orignal weights. 
         self.original_linear.weight.requires_grad = False
         if self.original_linear.bias is not None:
             self.original_linear.bias.requires_grad = False
