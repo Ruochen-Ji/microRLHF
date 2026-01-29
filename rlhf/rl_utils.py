@@ -3,6 +3,7 @@ rl_utils.py - Core utilities for PPO training (built from scratch for learning)
 """
 import torch
 import torch.nn.functional as F
+import warnings
 
 
 @torch.no_grad()
@@ -129,4 +130,258 @@ def compute_reward(generated_ids, prompt_length, max_new_tokens, eos_token_id):
     # length=0 -> -1, length=max -> +1
     rewards = (response_lengths / max_new_tokens) * 2 - 1
 
-    return rewards 
+    return rewards
+
+
+def compute_kl_penalty(model, ref_model, generated_ids, prompt_length):
+    """
+    Compute KL divergence between current policy and reference model.
+
+    Why do we need this?
+    - Without KL penalty, the model finds "shortcuts" to maximize reward
+    - Example: To maximize length reward, it could just output "the the the the..."
+    - KL penalty says: "stay close to how the original model would respond"
+    - This preserves language quality while optimizing for reward
+
+    The math:
+        KL(P || Q) = sum over x of P(x) * log(P(x) / Q(x))
+                   = sum over x of P(x) * (log P(x) - log Q(x))
+
+        Here:
+        - P = current policy (model being trained)
+        - Q = reference policy (frozen original model)
+
+    We compute KL at each response token position, then average.
+
+    Args:
+        model: current policy (being trained)
+        ref_model: reference policy (frozen, original model)
+        generated_ids: (batch_size, total_length) - the sequences we generated
+        prompt_length: int - where the response starts
+
+    Returns:
+        kl: scalar - mean KL divergence across batch and positions
+    """
+    # Get logits from both models for the generated sequence
+    # We need logits at positions [prompt_length-1, ..., total_length-2]
+    # because position i predicts token i+1
+
+    # Forward pass through reference model (no gradients needed)
+    with torch.no_grad():
+        """
+        Why generated_ids[:, :-1]?                                                   
+        This is the "shift by 1" for next-token prediction:                             
+        - Input: tokens [0, 1, 2, 3, 4]                                                 
+        - Model predicts: [1, 2, 3, 4, 5]                                               
+        - Position i in logits predicts token i+1    
+        """
+        ref_logits, _ = ref_model(generated_ids[:, :-1])  # (batch, seq_len-1, vocab)
+        # Forward pass, keep only response positions (predicting response tokens)
+        """
+        Why prompt_length - 1?                                                       
+        - Position prompt_length - 1 predicts the first response token                  
+        - We only care about KL over response tokens (not the prompt)     
+        """
+        ref_logits = ref_logits[:, prompt_length - 1:, :]  # (batch, response_len, vocab)
+        ref_log_probs = F.log_softmax(ref_logits, dim=-1)  
+
+    # Forward pass through current model (need gradients for training)
+    current_logits, _ = model(generated_ids[:, :-1])
+    current_logits = current_logits[:, prompt_length - 1:, :]
+    current_log_probs = F.log_softmax(current_logits, dim=-1)
+
+    # Convert current log probs to probs for the KL formula
+    current_probs = torch.exp(current_log_probs)
+
+    # KL(current || ref) = sum over vocab of current_prob * (current_log_prob - ref_log_prob)
+    # This is computed per position, then we average
+    # Shape: (batch, response_len, vocab) -> sum over vocab -> (batch, response_len)
+    kl_per_position = (current_probs * (current_log_probs - ref_log_probs)).sum(dim=-1)
+
+    # Average over positions and batch
+    kl = kl_per_position.mean()
+
+    return kl
+
+
+def compute_policy_loss(
+    model,
+    generated_ids,
+    old_log_probs,
+    advantages,
+    prompt_length,
+    clip_epsilon=0.2
+):
+    """
+    Compute the PPO clipped surrogate objective.
+
+    The key idea of PPO:
+    - We want to update the policy to increase probability of good actions
+    - But large updates can be unstable (policy might change too much)
+    - Solution: Clip the update to stay within a "trust region"
+
+    The math:
+        ratio = π_θ(a|s) / π_old(a|s)     # How much more/less likely is action now?
+
+        unclipped = ratio * advantage      # Naive policy gradient
+        clipped = clip(ratio, 1-ε, 1+ε) * advantage  # Constrained update
+
+        loss = -min(unclipped, clipped)    # Take the pessimistic bound
+
+    Why the min?
+        - If advantage > 0 (good action): we want to increase probability
+          - But clip prevents ratio from going above 1+ε
+          - Prevents "too confident" updates
+        - If advantage < 0 (bad action): we want to decrease probability
+          - But clip prevents ratio from going below 1-ε
+          - Prevents "too aggressive" decreases
+
+    Args:
+        model: current policy (being trained)
+        generated_ids: (batch_size, total_length) - sequences we generated
+        old_log_probs: (batch_size, response_length) - log probs at generation time
+        advantages: (batch_size,) - how much better than baseline (reward - baseline)
+        prompt_length: int - where response starts
+        clip_epsilon: float - PPO clipping parameter (typically 0.2)
+
+    Returns:
+        policy_loss: scalar - the PPO loss to minimize
+        stats: dict - ratio statistics for monitoring
+            - ratio_mean, ratio_min, ratio_max
+            - clip_fraction: how often we hit the clipping boundary
+            - approx_kl: approximate KL from ratio (for early stopping)
+    """
+    model.train()
+
+    # Get current policy's log probs for the same tokens we generated
+    # Forward pass: predict next token at each position
+    logits, _ = model(generated_ids[:, :-1])  # (batch, seq_len-1, vocab)
+
+    # Keep only response positions
+    logits = logits[:, prompt_length - 1:, :]  # (batch, response_len, vocab)
+    log_probs = F.log_softmax(logits, dim=-1)
+
+    # Get the log prob of each token we actually generated
+    # response_ids[i, j] is the token at position j of response i
+    response_ids = generated_ids[:, prompt_length:]  # (batch, response_len)
+
+    # Gather the log prob of each generated token
+    # log_probs is (batch, response_len, vocab)
+    # response_ids is (batch, response_len)
+    # We want (batch, response_len) - the log prob of each actual token
+    current_log_probs = log_probs.gather(
+        dim=-1,
+        index=response_ids.unsqueeze(-1)  # (batch, response_len, 1)
+    ).squeeze(-1)  # (batch, response_len)
+
+    # Sum log probs across the response to get log P(response | prompt)
+    # This treats the whole response as one "action"
+    current_log_probs_sum = current_log_probs.sum(dim=1)  # (batch,)
+    old_log_probs_sum = old_log_probs.sum(dim=1)          # (batch,)
+
+    # Compute the probability ratio
+    # ratio = exp(log π_new - log π_old) = π_new / π_old
+    ratio = torch.exp(current_log_probs_sum - old_log_probs_sum)  # (batch,)
+
+    # PPO clipped objective
+    # Unclipped: ratio * advantage (naive policy gradient)
+    unclipped = ratio * advantages
+
+    # Clipped: constrain ratio to [1-ε, 1+ε]
+    clipped_ratio = torch.clamp(ratio, 1 - clip_epsilon, 1 + clip_epsilon)
+    clipped = clipped_ratio * advantages
+
+    # Take the minimum (pessimistic bound)
+    # This prevents both overly optimistic increases AND decreases
+    policy_loss = -torch.min(unclipped, clipped).mean()
+
+    # Compute statistics for monitoring
+    with torch.no_grad():
+        # Clip fraction: how often did we hit the boundary?
+        # If this is high (>0.5), the policy is changing too fast
+        clipped_mask = (ratio < 1 - clip_epsilon) | (ratio > 1 + clip_epsilon)
+        clip_fraction = clipped_mask.float().mean().item()
+
+        # Approximate KL divergence (useful for early stopping)
+        # approx_kl ≈ 0.5 * E[(ratio - 1)^2] when ratio is close to 1
+        approx_kl = (0.5 * (ratio - 1) ** 2).mean().item()
+
+        stats = {
+            "ratio_mean": ratio.mean().item(),
+            "ratio_min": ratio.min().item(),
+            "ratio_max": ratio.max().item(),
+            "clip_fraction": clip_fraction,
+            "approx_kl": approx_kl,
+        }
+
+    return policy_loss, stats
+
+
+def check_training_health(stats, step, thresholds=None):
+    """
+    Check PPO training health and log warnings if metrics are off.
+
+    This helps catch training issues early:
+    - Ratio too extreme → policy changed too much, stale data
+    - Clip fraction too high → updates always hitting boundary
+    - Approx KL too high → consider early stopping this PPO epoch
+
+    Args:
+        stats: dict from compute_policy_loss()
+        step: current training step (for logging)
+        thresholds: dict of thresholds (optional, uses defaults)
+
+    Returns:
+        healthy: bool - True if all metrics are within thresholds
+    """
+    if thresholds is None:
+        thresholds = {
+            "ratio_min": 0.1,      # ratio below this is concerning
+            "ratio_max": 10.0,     # ratio above this is concerning
+            "clip_fraction": 0.5,  # more than 50% clipped is too much
+            "approx_kl": 0.1,      # KL above this suggests early stopping
+        }
+
+    healthy = True
+    issues = []
+
+    # Check ratio bounds
+    if stats["ratio_min"] < thresholds["ratio_min"]:
+        issues.append(
+            f"ratio_min={stats['ratio_min']:.4f} < {thresholds['ratio_min']} "
+            "(policy probability collapsed for some samples)"
+        )
+        healthy = False
+
+    if stats["ratio_max"] > thresholds["ratio_max"]:
+        issues.append(
+            f"ratio_max={stats['ratio_max']:.4f} > {thresholds['ratio_max']} "
+            "(policy probability exploded for some samples)"
+        )
+        healthy = False
+
+    # Check clip fraction
+    if stats["clip_fraction"] > thresholds["clip_fraction"]:
+        issues.append(
+            f"clip_fraction={stats['clip_fraction']:.2%} > {thresholds['clip_fraction']:.0%} "
+            "(too many samples hitting clip boundary)"
+        )
+        healthy = False
+
+    # Check approximate KL (soft warning, might want early stopping)
+    if stats["approx_kl"] > thresholds["approx_kl"]:
+        issues.append(
+            f"approx_kl={stats['approx_kl']:.4f} > {thresholds['approx_kl']} "
+            "(consider reducing PPO epochs or learning rate)"
+        )
+        # This is a soft warning, don't mark as unhealthy
+        # healthy = False
+
+    # Log warnings
+    if issues:
+        warnings.warn(
+            f"\n[Step {step}] Training health check failed:\n  - " +
+            "\n  - ".join(issues)
+        )
+
+    return healthy 
