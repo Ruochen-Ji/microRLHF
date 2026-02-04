@@ -167,6 +167,8 @@ def apply_lora_to_model(
     if target_modules is None:
         # Default: apply to attention projections only
         # These are the most impactful for style/task adaptation
+        # c_atten: Q, K, V 
+        # c_proj: Attention output -> Residual, MLP hidden -> output
         target_modules = ['c_attn', 'c_proj']
     
     # First, freeze all parameters in the model
