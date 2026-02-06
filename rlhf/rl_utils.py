@@ -300,11 +300,19 @@ def compute_policy_loss(
     # Compute ratio per token: π_new(token_t) / π_old(token_t)
     ratio = torch.exp(current_log_probs - old_log_probs)  # (batch, response_len)
 
-    # Broadcast advantages to all tokens in each response
-    # advantages is (batch,) → (batch, response_len)
-    # All tokens in a response share the same advantage (simplified credit assignment)
+    # Handle advantages shape:
+    # - If (batch,): broadcast to all tokens (old uniform credit assignment)
+    # - If (batch, response_len): use directly (GAE per-token credit assignment)
     response_len = current_log_probs.shape[1]
-    advantages_expanded = advantages.unsqueeze(1).expand(-1, response_len)  # (batch, response_len)
+
+    if advantages.dim() == 1:
+        # Old behavior: uniform advantage for all tokens
+        advantages_expanded = advantages.unsqueeze(1).expand(-1, response_len)
+    else:
+        # GAE: per-token advantages already provided
+        advantages_expanded = advantages
+        assert advantages.shape[1] == response_len, \
+            f"Advantages shape {advantages.shape} doesn't match response_len {response_len}"
 
     # =========================================================================
     # PPO clipped objective (per-token)
