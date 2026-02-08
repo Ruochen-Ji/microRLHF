@@ -31,7 +31,7 @@ from rl_utils import (
     compute_policy_loss,
     check_training_health,
 )
-from rewards import BrevityReward  # Try different reward functions here!
+from naive_reward import BrevityReward  # Try different reward functions here!
 
 def print_header(text, char="=", width=60):
     """Print a formatted section header."""

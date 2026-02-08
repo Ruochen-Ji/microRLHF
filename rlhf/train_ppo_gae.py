@@ -36,7 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from model import GPT, GPTConfig
 from lora import apply_lora_to_model
 from rl_utils import compute_kl_penalty, compute_policy_loss, check_training_health
-from rewards import BrevityReward
+from naive_reward import BrevityReward
 from ppo import (
     PolicyWithValueHead,
     compute_gae,

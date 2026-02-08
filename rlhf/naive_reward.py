@@ -1,5 +1,5 @@
 """
-rewards.py - Collection of reward functions for RLHF experiments
+naive_reward.py - Collection of heuristic/naive reward functions for RLHF experiments
 
 Each reward function demonstrates different behaviors and failure modes:
 - LengthReward: Rewards moderate length (50-80 tokens) - leads to verbosity hacking
