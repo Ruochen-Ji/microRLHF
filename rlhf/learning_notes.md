@@ -84,7 +84,8 @@ class ValueHead(nn.Module):
 
 ---
 
-## Part 3: TD Error (Temporal Difference)
+## Part 3: TD Error (Temporal Difference, one-step advantage estimate)
+TD Error represents "surprise". It is the numeric difference between what the model thought would happen and what actually happened one moment later.
 
 Once we have `V(s_t)`, we can compute how "surprising" each transition was:
 
@@ -97,6 +98,8 @@ Where:
 - `γ` (gamma) = discount factor (e.g., 0.99)
 - `V(s_{t+1})` = value of next state, or the expected total future reward of step t+1
 - `V(s_t)` = value of current state, or the expected total future reward of step t
+
+**Note that the calculation happens AFTER the sentence generation.**
 
 **Intuition**:
 - If `δ_t > 0`: Things went **better** than expected → increase this action's probability
@@ -146,6 +149,46 @@ This is just one line in code:
 ```python
 advantages[t] = td_errors[t] + gamma * lam * advantages[t + 1]
 ```
+
+### Where Does the Real Signal Come From?
+
+Since rewards are 0 for all tokens except the last, every intermediate TD error is just V noise:
+
+```
+δ_0 = 0 + γ·V(s_1) - V(s_0)    ← no real reward, just V difference
+δ_1 = 0 + γ·V(s_2) - V(s_1)    ← same
+δ_2 = 0 + γ·V(s_3) - V(s_2)    ← same
+...
+δ_T = r_T + 0 - V(s_T)          ← the ONLY δ with actual reward signal
+```
+
+All δ's are concrete numbers you can compute, but only δ_T contains the real reward. The backward pass propagates this real signal to all earlier tokens:
+
+```
+A_T   = δ_T                       ← real reward anchors this
+A_T-1 = δ_T-1 + (γλ)·A_T         ← A_T carries real reward backward
+A_T-2 = δ_T-2 + (γλ)·A_T-1       ← real reward propagates further
+...
+A_0   = δ_0   + (γλ)·A_1          ← every token eventually gets real signal
+```
+
+The intermediate δ's add V-based corrections along the way (which become more useful as V improves during training), but the backbone of the signal is the actual reward flowing backward from the last token.
+
+### How the Value Head Learns (MSE Loss)
+
+Once we have advantages, we compute **returns** (value targets):
+
+```
+returns = advantages + values    i.e., R_t = A_t + V(s_t)
+```
+
+The value head is trained with MSE loss to predict these returns:
+
+```
+value_loss = mean((V_current(s_t) - returns_t)²)
+```
+
+This trains V to predict the actual discounted return at each position. As V gets more accurate, the intermediate δ's become more meaningful (not just noise), which in turn produces better advantages for the policy — a virtuous cycle.
 
 ---
 
@@ -329,3 +372,82 @@ value_coef = 0.5  # Weight for value loss (typically 0.5)
 | `make_per_token_rewards()` | Converts scalar reward to per-token | ppo.py |
 | `PolicyWithValueHead` | Wraps GPT + ValueHead | ppo.py |
 | `compute_policy_loss()` | Updated to handle (batch, seq) advantages | rl_utils.py |
+
+---
+
+## Q&A: Key Confusions and Answers
+
+### Q1: What is "advantage" semantically?
+
+**Advantage = "How much better was this action than what I'd normally expect?"**
+
+```
+A(s, a) = Q(s, a) - V(s)
+```
+
+- Positive advantage: this token was better than average — reinforce it
+- Negative advantage: this token was worse than average — discourage it
+- Zero advantage: exactly as expected — nothing to learn
+
+### Q2: TD error and advantage — aren't they different things?
+
+They're the same formula. Start from `A = Q(s,a) - V(s)` and substitute `Q(s,a) = r + γ·V(s_{t+1})`:
+
+```
+A = Q(s,a) - V(s) = r + γ·V(s_{t+1}) - V(s) = δ (TD error)
+```
+
+TD error is a **one-step estimate** of advantage. GAE improves it by blending multi-step estimates (controlled by λ).
+
+### Q3: How can we evaluate V(s_{t+1}) without knowing the next token?
+
+We don't need to. GAE is computed **after** the full sequence is generated. V(s_{t+1}) is the value of the state that actually happened, not an average over possible futures. The timeline is:
+
+1. Generate full sequence (all tokens chosen)
+2. Run value head on every position (all V's computed at once)
+3. Compute TD errors using known V's
+
+### Q4: How does the value head learn to predict correctly from random init?
+
+The key: at the last position, the return target **always equals the actual reward**, regardless of V's predictions (the V terms cancel out). This real reward signal anchors the learning:
+
+```
+return_last = A_last + V(s_last)
+            = (reward - V(s_last)) + V(s_last)
+            = reward  ← always the real reward!
+```
+
+This anchor propagates backward through returns, giving the value head meaningful gradient from step 1.
+
+### Q5: Does the value head affect generation (logits)?
+
+**No.** The value head never touches logits or generation. It helps **indirectly**:
+
+```
+Better V(s) → better per-token advantages → better policy gradients → better responses
+```
+
+It's a coach watching game tape — doesn't play the game, but tells the player which moves were good.
+
+### Q6: Why are the two training scripts' loss functions different?
+
+```
+train_ppo.py:     loss = policy_loss + kl_coef * kl
+train_ppo_gae.py: loss = policy_loss + value_coef * value_loss + kl_coef * kl
+```
+
+The `value_loss` term exists because GAE introduces a learnable ValueHead (neural network). It needs MSE loss to train. The baseline script uses a simple running mean (not learnable), so no extra loss is needed.
+
+### Q7: If an important token ("Four") appears early, does GAE still give it credit?
+
+Early in training (random V): credit decays with distance from reward — earlier tokens get slightly less. But it's still positive, enough to learn from.
+
+Later in training (learned V): the value head learns that V jumps when "Four" is generated. This jump produces a large TD error for "Four" regardless of position:
+
+```
+V(prompt)          = 0.3   (uncertain)
+V(prompt + "Four") = 0.85  (already correct!)
+δ = 0.99·0.85 - 0.3 = 0.54  ← high advantage for "Four"
+```
+
+**Known limitation**: For very long sequences, early tokens may get weak signal before V is trained, since (γλ)^100 ≈ 0.006. This is why some systems add intermediate rewards.
