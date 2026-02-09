@@ -1,0 +1,4 @@
+# Ignore all training logs and checkpoints
+*
+# But keep this .gitignore so the folder exists in git
+!.gitignore

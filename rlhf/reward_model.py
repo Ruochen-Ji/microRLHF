@@ -111,6 +111,17 @@ class RewardTrainer:
         """
         Train reward model on preference pairs.
 
+        LR schedule: linear warmup (3% of steps) then cosine decay to 0.
+        - Warmup: LR ramps 0 → peak. At step 0 the reward head is randomly
+          initialized, so gradients are huge and noisy. Starting from 0
+          prevents those early wild gradients from causing bad updates.
+        - Cosine decay: LR follows a half-cosine from peak → 0. This spends
+          more time near the peak (where most learning happens) and near zero
+          (where it polishes), compared to linear decay which reduces too
+          aggressively in the middle. With multiple epochs, earlier epochs
+          train with high LR (big learning), later epochs with low LR
+          (gentle refinement), so each epoch plays a different role.
+
         Args:
             train_dataset: PreferenceDataset for training
             eval_dataset: Optional PreferenceDataset for evaluation
@@ -122,9 +133,35 @@ class RewardTrainer:
         """
         from torch.utils.data import DataLoader
         import time
+        import csv
+        import os
 
         train_loader = DataLoader(train_dataset, batch_size=batch_size,
                                   shuffle=True, num_workers=2)
+
+        # LR schedule: linear warmup (3%) then cosine decay to 0
+        import math
+        steps_per_epoch = len(train_loader)
+        total_steps = steps_per_epoch * num_epochs
+        warmup_steps = int(0.03 * total_steps)
+        print(f"Total steps: {total_steps}, warmup: {warmup_steps}")
+
+        def lr_lambda(step):
+            if step < warmup_steps:
+                return step / warmup_steps  # linear 0 → 1
+            # cosine decay from 1 → 0
+            progress = (step - warmup_steps) / (total_steps - warmup_steps)
+            return 0.5 * (1 + math.cos(math.pi * progress))
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
+
+        # CSV logging — save metrics alongside the checkpoint
+        log_path = save_path.replace(".pt", "_log.csv")
+        log_file = open(log_path, "w", newline="")
+        log_writer = csv.writer(log_file)
+        log_writer.writerow(["step", "loss", "avg_loss", "acc", "avg_acc",
+                             "grad_norm", "lr", "eval_loss", "eval_acc"])
+        print(f"Logging metrics to {log_path}")
 
         self.model.train()
         global_step = 0
@@ -156,6 +193,7 @@ class RewardTrainer:
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
+                scheduler.step()
 
                 # --- Track metrics ---
                 epoch_loss += loss.item()
@@ -167,19 +205,32 @@ class RewardTrainer:
                 if global_step % log_interval == 0:
                     avg_loss = epoch_loss / epoch_steps
                     avg_acc = epoch_acc / epoch_steps
+                    current_lr = scheduler.get_last_lr()[0]
                     dt = time.time() - t0
                     print(
                         f"step {global_step:>6d} | "
                         f"loss {loss.item():.4f} (avg {avg_loss:.4f}) | "
                         f"acc {acc.item():.0%} (avg {avg_acc:.0%}) | "
                         f"grad_norm {grad_norm:.2f} | "
+                        f"lr {current_lr:.2e} | "
                         f"{epoch_steps/dt:.1f} steps/s"
                     )
+                    log_writer.writerow([
+                        global_step, f"{loss.item():.4f}", f"{avg_loss:.4f}",
+                        f"{acc.item():.4f}", f"{avg_acc:.4f}",
+                        f"{grad_norm:.4f}", f"{current_lr:.6e}", "", ""
+                    ])
+                    log_file.flush()
 
                 # --- Evaluate and checkpoint ---
                 if eval_dataset is not None and global_step % eval_interval == 0:
                     eval_loss, eval_acc = self.evaluate(eval_dataset, batch_size)
                     print(f"  >>> EVAL: loss {eval_loss:.4f}, acc {eval_acc:.0%}")
+                    log_writer.writerow([
+                        global_step, "", "", "", "",
+                        "", "", f"{eval_loss:.4f}", f"{eval_acc:.4f}"
+                    ])
+                    log_file.flush()
                     if eval_acc > best_eval_acc:
                         best_eval_acc = eval_acc
                         torch.save(self.model.state_dict(), save_path)
@@ -188,6 +239,9 @@ class RewardTrainer:
             print(f"\n--- Epoch {epoch+1}/{num_epochs} ---")
             print(f"  Avg loss: {epoch_loss / epoch_steps:.4f}")
             print(f"  Avg accuracy: {epoch_acc / epoch_steps:.0%}\n")
+
+        log_file.close()
+        print(f"Metrics saved to {log_path}")
 
     @torch.no_grad()
     def evaluate(self, dataset, batch_size=4, max_batches=100):

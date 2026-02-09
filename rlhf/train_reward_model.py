@@ -32,11 +32,8 @@ trainer.train(
     train_ds,
     eval_dataset=eval_ds,
     batch_size=4,
-    num_epochs=1,
+    num_epochs=3,
     log_interval=50,
     eval_interval=500,
+    save_path="rlhf/logs/reward_model.pt",
 )
-
-# --- Save ---
-torch.save(model.state_dict(), "rlhf/reward_model.pt")
-print("Saved to rlhf/reward_model.pt")
