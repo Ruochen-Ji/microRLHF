@@ -24,9 +24,9 @@ Phase 2-3 Implementation:
 """
 
 import json
+import torch
 from torch.utils.data import Dataset
-
-# TODO: Phase 2-3 Implementation
+from datasets import load_dataset
 
 
 class InstructionDataset(Dataset):
@@ -56,26 +56,60 @@ class InstructionDataset(Dataset):
 class PreferenceDataset(Dataset):
     """Dataset for preference-based training (reward model, DPO)."""
 
-    def __init__(self, data_path, tokenizer, max_length=512):
+    def __init__(self, tokenizer, max_length=512, split="train"):
         """
         Args:
-            data_path: Path to preference JSON
-            tokenizer: Tokenizer for encoding
-            max_length: Maximum sequence length
+            tokenizer: tiktoken tokenizer (has .encode() and .eot_token)
+            max_length: Max tokens per sequence (truncate/pad to this)
+            split: "train" or "test"
         """
-        raise NotImplementedError("Phase 3: Preference dataset")
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.pad_token = tokenizer.eot_token  # GPT-2's <|endoftext|>
+        self.data = load_dataset("Anthropic/hh-rlhf", split=split)
 
     def __len__(self):
-        raise NotImplementedError()
+        return len(self.data)
+
+    def _tokenize_and_pad(self, text):
+        """Tokenize text, truncate/pad to max_length, build attention mask."""
+        token_ids = self.tokenizer.encode(text)
+
+        # Truncate if too long
+        if len(token_ids) > self.max_length:
+            token_ids = token_ids[:self.max_length]
+
+        real_length = len(token_ids)
+        padding_needed = self.max_length - real_length
+
+        # Attention mask: 1 = real token, 0 = padding
+        attention_mask = [1] * real_length + [0] * padding_needed
+
+        # Pad token_ids with eot_token
+        token_ids = token_ids + [self.pad_token] * padding_needed
+
+        return (
+            torch.tensor(token_ids, dtype=torch.long),
+            torch.tensor(attention_mask, dtype=torch.long),
+        )
 
     def __getitem__(self, idx):
         """
-        Returns tokenized preference triple.
+        Returns tokenized preference pair.
 
         Returns:
-            dict with keys: prompt_ids, chosen_ids, rejected_ids
+            dict with keys: chosen_ids, chosen_mask, rejected_ids, rejected_mask
         """
-        raise NotImplementedError()
+        example = self.data[idx]
+        chosen_ids, chosen_mask = self._tokenize_and_pad(example["chosen"])
+        rejected_ids, rejected_mask = self._tokenize_and_pad(example["rejected"])
+
+        return {
+            "chosen_ids": chosen_ids,
+            "chosen_mask": chosen_mask,
+            "rejected_ids": rejected_ids,
+            "rejected_mask": rejected_mask,
+        }
 
 
 def load_alpaca_data(path):

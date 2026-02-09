@@ -22,6 +22,17 @@ cd /home/ruochen/projects/nanoGPT
 python rlhf/train_ppo_gae.py
 ```
 
+### 3. `train_reward_model.py` - Reward Model Training
+
+Trains a reward model on [Anthropic HH-RLHF](https://huggingface.co/datasets/Anthropic/hh-rlhf) human preference data. Uses GPT-2 as backbone with a scalar reward head, trained with Bradley-Terry pairwise ranking loss.
+
+```bash
+cd /home/ruochen/projects/nanoGPT
+python -m rlhf.train_reward_model
+```
+
+Saves checkpoint to `rlhf/reward_model.pt`. Takes ~1 hour for 1 epoch on a single GPU.
+
 ## Key Differences
 
 | Aspect | train_ppo.py (baseline) | train_ppo_gae.py (GAE) |

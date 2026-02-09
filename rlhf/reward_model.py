@@ -28,14 +28,19 @@ class RewardModel(nn.Module):
         GPT-2 backbone (frozen or fine-tuned) + scalar output head
     """
 
-    def __init__(self, gpt_model, config=None):
+    def __init__(self, gpt_model):
         """
         Args:
-            gpt_model: Pre-trained GPT model to use as backbone
-            config: Reward model configuration
+            gpt_model: Pre-trained GPT model (from model.py).
+                       We take its transformer blocks but discard lm_head.
         """
         super().__init__()
-        raise NotImplementedError("Phase 4: Reward model architecture")
+        # Keep the transformer backbone (embeddings + blocks + final layernorm)
+        self.transformer = gpt_model.transformer
+        n_embd = gpt_model.config.n_embd  # 768 for GPT-2 small
+
+        # New scalar head: maps 768-dim hidden state → 1 scalar reward
+        self.reward_head = nn.Linear(n_embd, 1, bias=False)
 
     def forward(self, input_ids, attention_mask=None):
         """
@@ -43,19 +48,44 @@ class RewardModel(nn.Module):
 
         Args:
             input_ids: Token IDs [batch, seq_len]
-            attention_mask: Optional attention mask
+            attention_mask: [batch, seq_len] — 1 for real tokens, 0 for padding
 
         Returns:
             rewards: Scalar rewards [batch]
         """
-        raise NotImplementedError("Phase 4: Reward model forward")
+        device = input_ids.device
+        b, t = input_ids.size()
+
+        # Run through transformer backbone to get hidden states
+        pos = torch.arange(0, t, dtype=torch.long, device=device)
+        tok_emb = self.transformer.wte(input_ids)  # (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos)         # (t, n_embd)
+        x = self.transformer.drop(tok_emb + pos_emb)
+        for block in self.transformer.h:
+            x = block(x)
+        x = self.transformer.ln_f(x)  # (b, t, n_embd)
+
+        # --- Step 2: Find last real token per example ---
+        if attention_mask is not None:
+            last_token_idx = attention_mask.sum(dim=1) - 1  # (b,)
+        else:
+            last_token_idx = torch.full((b,), t - 1, dtype=torch.long, device=device)
+
+        # Index into x: for each example in the batch, grab its last real hidden state
+        last_hidden = x[torch.arange(b, device=device), last_token_idx]  # (b, n_embd)
+
+        # --- Step 3: Scalar reward ---
+        rewards = self.reward_head(last_hidden).squeeze(-1)  # (b,)
+        return rewards
 
 
 class RewardTrainer:
     """Trainer for reward model using Bradley-Terry loss."""
 
-    def __init__(self, model, config):
-        raise NotImplementedError("Phase 4: Reward trainer")
+    def __init__(self, model, lr=1e-5, device="cuda"):
+        self.model = model
+        self.device = device
+        self.optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
 
     def compute_loss(self, chosen_rewards, rejected_rewards):
         """
@@ -67,9 +97,124 @@ class RewardTrainer:
 
         Returns:
             loss: Scalar loss value
+            accuracy: Fraction where chosen > rejected
         """
-        raise NotImplementedError("Phase 4: Bradley-Terry loss")
+        diff = chosen_rewards - rejected_rewards
+        # F.logsigmoid is numerically stable (avoids computing log(0))
+        loss = -nn.functional.logsigmoid(diff).mean()
+        accuracy = (diff > 0).float().mean()
+        return loss, accuracy
 
-    def train(self, preference_dataset):
-        """Train reward model on preference pairs."""
-        raise NotImplementedError("Phase 4: Reward model training")
+    def train(self, train_dataset, eval_dataset=None, batch_size=4,
+              num_epochs=1, log_interval=50, eval_interval=500,
+              save_path="rlhf/reward_model.pt"):
+        """
+        Train reward model on preference pairs.
+
+        Args:
+            train_dataset: PreferenceDataset for training
+            eval_dataset: Optional PreferenceDataset for evaluation
+            batch_size: Examples per batch
+            num_epochs: Passes over the full dataset
+            log_interval: Print metrics every N steps
+            eval_interval: Run evaluation every N steps
+            save_path: Where to save best checkpoint
+        """
+        from torch.utils.data import DataLoader
+        import time
+
+        train_loader = DataLoader(train_dataset, batch_size=batch_size,
+                                  shuffle=True, num_workers=2)
+
+        self.model.train()
+        global_step = 0
+        best_eval_acc = 0.0
+
+        for epoch in range(num_epochs):
+            epoch_loss = 0
+            epoch_acc = 0
+            epoch_steps = 0
+            t0 = time.time()
+
+            for batch in train_loader:
+                # --- Move to device ---
+                chosen_ids = batch["chosen_ids"].to(self.device)
+                chosen_mask = batch["chosen_mask"].to(self.device)
+                rejected_ids = batch["rejected_ids"].to(self.device)
+                rejected_mask = batch["rejected_mask"].to(self.device)
+
+                # --- Forward: score both responses ---
+                chosen_rewards = self.model(chosen_ids, chosen_mask)
+                rejected_rewards = self.model(rejected_ids, rejected_mask)
+
+                # --- Loss ---
+                loss, acc = self.compute_loss(chosen_rewards, rejected_rewards)
+
+                # --- Backward ---
+                self.optimizer.zero_grad()
+                loss.backward()
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), max_norm=1.0)
+                self.optimizer.step()
+
+                # --- Track metrics ---
+                epoch_loss += loss.item()
+                epoch_acc += acc.item()
+                epoch_steps += 1
+                global_step += 1
+
+                # --- Log ---
+                if global_step % log_interval == 0:
+                    avg_loss = epoch_loss / epoch_steps
+                    avg_acc = epoch_acc / epoch_steps
+                    dt = time.time() - t0
+                    print(
+                        f"step {global_step:>6d} | "
+                        f"loss {loss.item():.4f} (avg {avg_loss:.4f}) | "
+                        f"acc {acc.item():.0%} (avg {avg_acc:.0%}) | "
+                        f"grad_norm {grad_norm:.2f} | "
+                        f"{epoch_steps/dt:.1f} steps/s"
+                    )
+
+                # --- Evaluate and checkpoint ---
+                if eval_dataset is not None and global_step % eval_interval == 0:
+                    eval_loss, eval_acc = self.evaluate(eval_dataset, batch_size)
+                    print(f"  >>> EVAL: loss {eval_loss:.4f}, acc {eval_acc:.0%}")
+                    if eval_acc > best_eval_acc:
+                        best_eval_acc = eval_acc
+                        torch.save(self.model.state_dict(), save_path)
+                        print(f"  >>> Saved best model (acc {eval_acc:.0%}) to {save_path}")
+
+            print(f"\n--- Epoch {epoch+1}/{num_epochs} ---")
+            print(f"  Avg loss: {epoch_loss / epoch_steps:.4f}")
+            print(f"  Avg accuracy: {epoch_acc / epoch_steps:.0%}\n")
+
+    @torch.no_grad()
+    def evaluate(self, dataset, batch_size=4, max_batches=100):
+        """Evaluate on a dataset. Returns (avg_loss, avg_accuracy)."""
+        from torch.utils.data import DataLoader
+
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
+        self.model.eval()
+        total_loss = 0
+        total_acc = 0
+        n = 0
+
+        for i, batch in enumerate(loader):
+            if i >= max_batches:
+                break
+            chosen_ids = batch["chosen_ids"].to(self.device)
+            chosen_mask = batch["chosen_mask"].to(self.device)
+            rejected_ids = batch["rejected_ids"].to(self.device)
+            rejected_mask = batch["rejected_mask"].to(self.device)
+
+            chosen_rewards = self.model(chosen_ids, chosen_mask)
+            rejected_rewards = self.model(rejected_ids, rejected_mask)
+            loss, acc = self.compute_loss(chosen_rewards, rejected_rewards)
+
+            total_loss += loss.item()
+            total_acc += acc.item()
+            n += 1
+
+        self.model.train()
+        return total_loss / n, total_acc / n
