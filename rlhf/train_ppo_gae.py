@@ -464,6 +464,15 @@ for step in range(num_steps):
 log_file.close()
 print(f"Metrics saved to {log_path}")
 
+# Save RLHF policy checkpoint
+rlhf_save_path = "rlhf/logs/rlhf_policy.pt"
+torch.save({
+    'model': policy_model.gpt.state_dict(),
+    'model_args': checkpoint['model_args'],
+    'lora_config': checkpoint['lora_config'],
+}, rlhf_save_path)
+print(f"RLHF policy saved to {rlhf_save_path}")
+
 print_header("Training Complete!")
 
 print(f"""
