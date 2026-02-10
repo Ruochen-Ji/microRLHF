@@ -272,3 +272,57 @@ class RewardTrainer:
 
         self.model.train()
         return total_loss / n, total_acc / n
+
+
+class TrainedRewardModel:
+    """
+    Wraps a trained RewardModel to match the naive reward function interface.
+
+    The naive reward functions (LengthReward, BrevityReward, etc.) use:
+        reward = compute(generated_ids, prompt_length, max_new_tokens, eos_token_id)
+
+    This wrapper adapts the trained RewardModel (which takes input_ids + attention_mask)
+    to the same interface, handling attention mask construction for left-padded
+    sequences and post-EOS masking.
+    """
+
+    def __init__(self, reward_model):
+        self.reward_model = reward_model
+
+    def compute(self, generated_ids, prompt_length, max_new_tokens, eos_token_id):
+        """
+        Compute rewards using the trained reward model.
+
+        Builds an attention mask that:
+        1. Masks left-padding (leading eos tokens before the real prompt)
+        2. Masks tokens after the first EOS in the response
+
+        Args:
+            generated_ids: (batch_size, seq_len) - prompt + generated response
+            prompt_length: int - number of tokens in the (padded) prompt
+            max_new_tokens: int - maximum response length (unused, kept for interface compat)
+            eos_token_id: int - end-of-sequence token ID
+
+        Returns:
+            rewards: (batch_size,) - scalar reward per example
+        """
+        batch_size, seq_len = generated_ids.shape
+        attention_mask = torch.ones_like(generated_ids)
+
+        for i in range(batch_size):
+            # Mask left-padding (leading eos tokens before the real prompt)
+            for j in range(prompt_length):
+                if generated_ids[i, j].item() == eos_token_id:
+                    attention_mask[i, j] = 0
+                else:
+                    break
+
+            # Mask tokens after first EOS in the response
+            for j in range(prompt_length, seq_len):
+                if generated_ids[i, j].item() == eos_token_id:
+                    attention_mask[i, j + 1:] = 0
+                    break
+
+        with torch.no_grad():
+            rewards = self.reward_model(generated_ids, attention_mask)
+        return rewards

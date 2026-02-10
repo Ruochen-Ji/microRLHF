@@ -25,6 +25,7 @@ Architecture:
 """
 import os
 import sys
+import csv
 import random
 import torch
 import tiktoken
@@ -37,6 +38,7 @@ from model import GPT, GPTConfig
 from lora import apply_lora_to_model
 from rl_utils import compute_kl_penalty, compute_policy_loss, check_training_health
 from naive_reward import BrevityReward
+from reward_model import RewardModel, TrainedRewardModel
 from ppo import (
     PolicyWithValueHead,
     compute_gae,
@@ -69,15 +71,15 @@ temperature = 1.0
 eos_token_id = 50256
 
 # PPO Training config
-num_steps = 50
-batch_size = 4
-ppo_epochs = 4
-learning_rate = 3e-5
-clip_epsilon = 0.3
+num_steps = 200
+batch_size = 8
+ppo_epochs = 2
+learning_rate = 1e-5
+clip_epsilon = 0.2
 max_grad_norm = 1.0
 
 # KL penalty
-kl_coef = 0.02
+kl_coef = 0.05
 
 # GAE hyperparameters (NEW!)
 gamma = 0.99      # Discount factor: how much to value future rewards
@@ -88,9 +90,19 @@ value_coef = 0.5  # Weight for value loss (0.5 is standard)
 log_interval = 10
 sample_interval = 50
 
-# Reward function
-reward_fn = BrevityReward(max_good_length=30, eos_bonus=0.5)
-print(f"\nReward function: {reward_fn.__class__.__name__}")
+# Reward function — trained reward model from Anthropic HH-RLHF
+# To use a naive reward instead, uncomment:
+#   reward_fn = BrevityReward(max_good_length=30, eos_bonus=0.5)
+print("\nLoading trained reward model...")
+reward_gpt = GPT.from_pretrained("gpt2")
+reward_model = RewardModel(reward_gpt).to(device)
+reward_model.load_state_dict(torch.load("rlhf/logs/reward_model.pt", map_location=device))
+reward_model.eval()
+for param in reward_model.parameters():
+    param.requires_grad = False
+del reward_gpt
+reward_fn = TrainedRewardModel(reward_model)
+print(f"Reward function: {reward_fn.__class__.__name__} (trained on Anthropic HH-RLHF)")
 
 # -----------------------------------------------------------------------------
 # Step 1: Load SFT'd GPT-2 with LoRA
@@ -243,6 +255,18 @@ metrics_history = {
     "advantage_std": [],   # NEW!
 }
 
+# CSV logging for plotting later
+log_path = "rlhf/logs/ppo_gae_log.csv"
+os.makedirs(os.path.dirname(log_path), exist_ok=True)
+log_file = open(log_path, "w", newline="")
+log_writer = csv.writer(log_file)
+log_writer.writerow([
+    "step", "reward_mean", "reward_std", "kl", "policy_loss",
+    "value_loss", "response_length", "ratio_mean", "clip_fraction",
+    "advantage_mean", "advantage_std"
+])
+print(f"Logging metrics to {log_path}")
+
 print(f"""
 Training config:
   - Steps: {num_steps}
@@ -392,6 +416,22 @@ for step in range(num_steps):
     metrics_history["advantage_mean"].append(adv_mean.item())
     metrics_history["advantage_std"].append(adv_std.item())
 
+    # Write to CSV
+    log_writer.writerow([
+        step,
+        f"{scalar_rewards.mean().item():.4f}",
+        f"{scalar_rewards.std().item():.4f}",
+        f"{kl.item():.4f}",
+        f"{policy_loss.item():.4f}",
+        f"{value_loss.item():.4f}",
+        f"{avg_response_length:.1f}",
+        f"{stats['ratio_mean']:.4f}",
+        f"{stats['clip_fraction']:.4f}",
+        f"{adv_mean.item():.4f}",
+        f"{adv_std.item():.4f}",
+    ])
+    log_file.flush()
+
     # Print progress
     if step % log_interval == 0:
         print(f"Step {step:4d} | "
@@ -421,6 +461,9 @@ for step in range(num_steps):
 # -----------------------------------------------------------------------------
 # Training Complete
 # -----------------------------------------------------------------------------
+log_file.close()
+print(f"Metrics saved to {log_path}")
+
 print_header("Training Complete!")
 
 print(f"""
