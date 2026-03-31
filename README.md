@@ -1,25 +1,24 @@
-# MicroRLHF: A Minimal RLHF Implementation for beginners
+# MicroRLHF: A Minimal RLHF Implementation for Beginners
 
-Building on [nanoGPT](https://github.com/karpathy/nanoGPT), this project implements the complete post-training pipeline—SFT, LoRA, Reward Modeling, PPO, and DPO—with minimal, readable code designed for learning.
+Building on [nanoGPT](https://github.com/karpathy/nanoGPT), this project implements the post-training pipeline — LoRA, Reward Modeling, and PPO — with minimal, readable code designed for learning.
 
 ## Why This Project?
 
-I personally had lots of fun learning from Andrej's nanoGPT project and it was truly a gem. At the end of the video of nanoGPT, Andrej pulled out OpenAI's (article)[https://openai.com/index/chatgpt/] that demonstrates how OpenAI trained the model to have assistant-like behavior. 
+I personally had lots of fun learning from Andrej's nanoGPT project and it was truly a gem. At the end of the video of nanoGPT, Andrej pulled out OpenAI's [article](https://openai.com/index/chatgpt/) that demonstrates how OpenAI trained the model to have assistant-like behavior.
 
-This repo is a continuation of nanoGPT that tries to replicate what OpenAI does with minimum hardware requirement(you'll still need GPU to run this). 
+This repo is a continuation of nanoGPT that tries to replicate what OpenAI does with minimum hardware requirement (you'll still need a GPU to run this).
 
-NanoRLHF tries to follow nano-gpt's etho: **minimal code, maximum insight**. Every component is implemented from scratch with clear explanations.
+MicroRLHF follows nanoGPT's ethos: **minimal code, maximum insight**. Every component is implemented from scratch with clear explanations.
 
-## What we'll Learn
+## What You'll Learn
 
 ```
-Pretrained LLM → SFT → RLHF → Aligned Model
-├── How instruction-following is trained (SFT)
-├── How to collect and use human preferences
+Pretrained LLM → LoRA Finetuning → Reward Modeling → PPO → Aligned Model
+├── How LoRA enables parameter-efficient finetuning
 ├── How reward models learn to predict human judgment
 ├── Why PPO needs a KL penalty (and what happens without it)
-├── How DPO eliminates the reward model entirely
-└── The failure modes that make alignment hard
+├── How GAE enables per-token credit assignment
+└── The failure modes that make alignment hard (reward hacking, EOS spamming)
 ```
 
 ## Hardware Requirements
@@ -42,66 +41,34 @@ Total:                  ~5-6GB
 
 ---
 
-## Roadmap
+## What's Implemented
 
-### Phase 1: Infrastructure
-> Goal: Minimal UI for training, finetuning, and inference
+### LoRA (Low-Rank Adaptation)
+Parameter-efficient finetuning that decomposes weight updates into low-rank matrices. Integrated into the nanoGPT training and inference loop.
 
-- [ ] Set up Gradio/Streamlit app with tab navigation
-- [ ] **Inference Tab**: Chat interface with tokens/sec display
-- [ ] **Training Tab**: Streaming loss curves, basic hyperparameter controls
-- [ ] **Finetune Tab**: SFT and LoRA options
-- [ ] Checkpoint save/load functionality
+```python
+# Full finetuning: 768 x 768 = 589,824 parameters
+# LoRA (r=8):  768 x 8 + 8 x 768 = 12,288 parameters (~48x fewer!)
+W_new = W + B @ A   # B ∈ R^(d×r), A ∈ R^(r×k), r << min(d,k)
+```
 
-### Phase 2: Supervised Fine-Tuning (SFT)
-> Goal: Turn base GPT-2 into an instruction-following model
+See `lora.py` for the full implementation with merge support.
 
-- [ ] Prepare instruction dataset (Alpaca format: instruction → response)
-- [ ] Implement SFT training loop
-- [ ] Add LoRA as memory-efficient finetuning option
-- [ ] Compare base vs. SFT model outputs in chat interface
+### Reward Modeling
+Trains a scalar reward head on top of GPT-2 using the Bradley-Terry model and the [Anthropic HH-RLHF](https://huggingface.co/datasets/Anthropic/hh-rlhf) preference dataset.
 
-**Key Concept**: SFT teaches the model the *format* of helpful responses, but not necessarily *what* humans prefer.
+```python
+# Core insight: train reward(chosen) > reward(rejected)
+loss = -log(sigmoid(reward_chosen - reward_rejected))
+```
 
-### Phase 3: Preference Data Collection
-> Goal: Build a dataset of human preferences for training the reward model
+Train it with:
+```bash
+python -m rlhf.train_reward_model
+```
 
-- [ ] **Annotation UI**: Side-by-side response comparison
-  - Generate 2 responses for same prompt
-  - Human selects: A > B, B > A, or Tie
-  - Export as preference dataset
-- [ ] Implement preference data format:
-  ```python
-  {
-      "prompt": "How do I make coffee?",
-      "chosen": "Here's a step-by-step guide...",
-      "rejected": "Coffee is a beverage..."
-  }
-  ```
-- [ ] (Optional) Synthetic preferences using stronger model as judge
-
-### Phase 4: Reward Modeling
-> Goal: Train a model to predict human preferences
-
-- [ ] Reward model architecture (GPT-2 + scalar output head)
-- [ ] Implement Bradley-Terry loss:
-  ```python
-  # Core insight: train reward(chosen) > reward(rejected)
-  loss = -log(sigmoid(reward_chosen - reward_rejected))
-  ```
-- [ ] Training pipeline with preference pairs
-- [ ] Evaluation: accuracy on held-out preferences
-- [ ] Visualization: reward distribution histograms
-
-**Key Concept**: The reward model learns to *simulate* human judgment, enabling us to score millions of responses without human labelers.
-
-### Phase 5: RLHF with PPO
-> Goal: Use the reward model to improve the policy via reinforcement learning
-
-#### 5.1 Architecture Setup
-- [ ] Policy model (trainable GPT-2)
-- [ ] Reference model (frozen copy of initial policy)
-- [ ] Value head (for PPO advantage estimation)
+### PPO with KL Penalty
+The full PPO loop: generate responses, score them, compute advantages, update the policy. Includes a frozen reference model to prevent reward hacking via KL penalty.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -116,13 +83,6 @@ Total:                  ~5-6GB
 └─────────────────────────────────────────────────────────────┘
 ```
 
-#### 5.2 Training Loop
-- [ ] Generate responses from current policy
-- [ ] Score with reward model
-- [ ] Compute KL penalty: `KL(policy || reference)`
-- [ ] PPO update with advantage estimation
-- [ ] Logging: reward, KL divergence, policy loss
-
 ```python
 # The core RLHF objective
 reward_total = reward_model(response) - beta * KL(policy || reference)
@@ -130,94 +90,65 @@ reward_total = reward_model(response) - beta * KL(policy || reference)
 #              Be helpful                     Don't drift from base model
 ```
 
-#### 5.3 Ablations & Failure Modes
-- [ ] **Experiment**: What happens without KL penalty?
-  - Demonstrate reward hacking (high reward, garbage output)
-- [ ] **Experiment**: What happens with beta too high/low?
-- [ ] Visualize KL divergence over training
+Two training scripts are provided:
+```bash
+python -m rlhf.train_ppo       # Basic PPO with uniform advantages
+python -m rlhf.train_ppo_gae   # PPO with GAE for per-token credit assignment
+```
 
-**Key Concept**: The KL penalty prevents the policy from finding adversarial responses that "hack" the reward model while producing gibberish.
+### Naive Reward Functions (for Ablations)
+Heuristic reward functions that demonstrate RLHF failure modes:
 
-### Phase 6: Direct Preference Optimization (DPO)
-> Goal: Achieve RLHF results without reward model or PPO
+| Reward | What it rewards | Failure mode |
+|--------|----------------|--------------|
+| `LengthReward` | Moderate length (50-80 tokens) | Verbosity hacking |
+| `BrevityReward` | Short responses | EOS spamming |
+| `TargetLengthReward` | Specific length range | Padding/truncation |
 
-- [ ] Implement DPO loss:
-  ```python
-  # The elegant insight: reward is implicit in policy ratios
-  log_ratio_w = log_prob(policy, chosen) - log_prob(ref, chosen)
-  log_ratio_l = log_prob(policy, rejected) - log_prob(ref, rejected)
-  loss = -log(sigmoid(beta * (log_ratio_w - log_ratio_l)))
-  ```
-- [ ] Train on same preference data as reward model
-- [ ] Compare DPO vs PPO:
-  - Training stability
-  - Final model quality
-  - Compute requirements
-
-**Key Concept**: DPO shows that the optimal RLHF policy has a closed form—we can skip reward modeling and RL entirely by training directly on preferences.
-
-### Phase 7: Evaluation & Visualization
-> Goal: Demonstrate what was learned and make it tangible
-
-- [ ] **Chat Comparison**: Base → SFT → RLHF side-by-side
-- [ ] **Training Curves Dashboard**:
-  - Reward over time
-  - KL divergence
-  - Policy/value loss
-- [ ] **Ablation Summary**: Table comparing all approaches
-- [ ] **Failure Mode Gallery**: Examples of reward hacking, mode collapse
+These are useful for experimenting with PPO before training a full reward model.
 
 ---
 
 ## Project Structure
 
 ```
-nanoRLHF/
-├── app/
-│   ├── app.py              # Gradio/Streamlit entry point
-│   ├── inference_tab.py    # Chat interface
-│   ├── training_tab.py     # Training visualization
-│   ├── finetune_tab.py     # SFT/LoRA controls
-│   └── annotate_tab.py     # Preference collection UI
-├── nanogpt/                # Base nanoGPT code (wrapper module)
-│   └── __init__.py         # Exports GPT, GPTConfig from root
-├── data/
-│   ├── shakespeare/        # Character-level Shakespeare data
-│   │   └── prepare.py
-│   ├── shakespeare_char/   # Token-level Shakespeare data
-│   │   └── prepare.py
-│   ├── alpaca/             # Instruction-following dataset (SFT)
-│   │   └── prepare.py
-│   ├── openwebtext/        # Large-scale pretraining data
-│   │   └── prepare.py
-│   ├── preferences/        # Human preference data (RLHF)
-│   │   ├── train.json      # Training preferences
-│   │   └── val.json        # Validation preferences
-│   └── prompts/            # Prompts for PPO generation
-│       └── train.json
-├── rlhf/
-│   ├── sft.py              # Supervised fine-tuning
-│   ├── lora.py             # LoRA implementation
-│   ├── reward_model.py     # Reward model architecture & training
-│   ├── ppo.py              # PPO trainer
-│   ├── dpo.py              # DPO trainer
-│   └── data.py             # Preference dataset handling
-├── configs/
-│   ├── sft_config.yaml
+microRLHF/
+├── model.py                    # GPT-2 architecture (from nanoGPT)
+├── train.py                    # Pretraining script (+ LoRA support)
+├── sample.py                   # Inference/generation (+ LoRA support)
+├── lora.py                     # LoRA implementation
+├── configurator.py             # Config file parsing
+│
+├── rlhf/                       # RLHF implementation
+│   ├── reward_model.py         # RewardModel + RewardTrainer (Bradley-Terry)
+│   ├── train_reward_model.py   # Train reward model on HH-RLHF data
+│   ├── ppo.py                  # ValueHead, GAE, PolicyWithValueHead
+│   ├── rl_utils.py             # PPO utilities (generate, KL, policy loss)
+│   ├── train_ppo.py            # PPO training loop (basic)
+│   ├── train_ppo_gae.py        # PPO training loop (with GAE)
+│   ├── naive_reward.py         # Heuristic rewards for ablations
+│   ├── data.py                 # PreferenceDataset (Anthropic HH-RLHF)
+│   ├── plots/                  # Training visualizations
+│   └── analysis/               # Analysis scripts and notes
+│
+├── config/                     # nanoGPT training configs
+│   ├── train_gpt2.py
+│   ├── train_shakespeare_char.py
+│   ├── finetune_shakespeare.py
+│   ├── finetune_shakespeare_lora.py
+│   └── finetune_alpaca_lora.py
+│
+├── configs/                    # RLHF hyperparameter configs
 │   ├── reward_config.yaml
-│   ├── ppo_config.yaml
-│   └── dpo_config.yaml
-├── scripts/
-│   ├── train_sft.py        # SFT training script
-│   ├── collect_preferences.py
-│   ├── train_reward_model.py
-│   ├── train_ppo.py
-│   └── train_dpo.py
-├── model.py                # Core GPT model (from nanoGPT)
-├── train.py                # Base training script
-├── sample.py               # Inference/generation script
-├── lora.py                 # LoRA implementation
-└── README.md
+│   └── ppo_config.yaml
+│
+├── data/                       # Dataset preparation
+│   ├── shakespeare/
+│   ├── shakespeare_char/
+│   └── openwebtext/
+│
+└── chat/                       # Chat interface
+    └── gradio_app.py
 ```
 
 ---
@@ -233,7 +164,7 @@ $$\mathcal{L}_{\text{PPO}} = \mathbb{E}\left[\min\left(\frac{\pi_\theta}{\pi_{\t
 ### RLHF Reward with KL Penalty
 $$R_{\text{total}} = R_{\phi}(y|x) - \beta \cdot \text{KL}(\pi_\theta \| \pi_{\text{ref}})$$
 
-### DPO Loss
+### DPO Loss (for reference)
 $$\mathcal{L}_{\text{DPO}} = -\log \sigma\left(\beta \log \frac{\pi_\theta(y_w|x)}{\pi_{\text{ref}}(y_w|x)} - \beta \log \frac{\pi_\theta(y_l|x)}{\pi_{\text{ref}}(y_l|x)}\right)$$
 
 ---
